@@ -139,8 +139,11 @@
     - name: dspace | config
       template: src=templates/build.properties.j2 dest={{dspace_source_dir}}/{{apache_server_hostname}}.properties
       tags: dspace
+    - name: dspace | clean
+      command: mvn clean chdir={{dspace_source_dir}}
+      tags: dspace
     - name: dspace | build
-      command: mvn -U package -Denv={{apache_server_hostname}} chdir={{dspace_source_dir}}
+      command: mvn package -Denv={{apache_server_hostname}} chdir={{dspace_source_dir}}
       tags: dspace
     - name: dspace | perform fresh install
       command: /opt/apache-ant-1.9.2/bin/ant fresh_install chdir={{dspace_source_dir}}/dspace/target/dspace-3.1-build creates={{dspace_install_dir}}/webapps/xmlui
