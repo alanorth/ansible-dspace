@@ -1,0 +1,187 @@
+---
+##
+# Install dependencies
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: switch to faster apt mirror
+      template: src=templates/sources.list.j2 dest=/etc/apt/sources.list
+      tags: deps
+    - name: ensure apt cache is up to date
+      apt: update_cache=yes
+      tags: deps
+    - name: ensure app apt dependencies are installed
+      apt: pkg={{item}} install_recommends=no
+      with_items:
+        - ant
+        - maven
+        - apache2-mpm-prefork
+        - postgresql
+        - postgresql-contrib
+        - tomcat7
+        - libtcnative-1 # native jni libs for tomcat
+        - python-pycurl # for ansible repo stuff
+        - python-software-properties # for ansible repo stuff (add-apt-repository)
+        - python-psycopg2 # for ansible postgres stuff
+        - git # for repo checkout
+      tags: deps
+    - name: download newer ant binary
+      command: wget http://apache.tradebit.com/pub//ant/binaries/apache-ant-1.9.2-bin.tar.bz2 chdir=/tmp creates=/tmp/apache-ant-1.9.2-bin.tar.bz2
+      tags: deps
+    - name: unzip ant binary
+      command: tar xf /tmp/apache-ant-1.9.2-bin.tar.bz2 -C /opt creates=/opt/apache-ant-1.9.2
+      tags: deps
+    - name: override system ant for some picky mvn modules
+      shell: echo 'export PATH="/opt/apache-ant-1.9.2/bin:$PATH"' > /etc/profile.d/ant.sh creates=/etc/profile.d/ant.sh
+      tags: deps
+
+##
+# Configure PostgreSQL
+- hosts: dspace
+  sudo: yes
+  sudo_user: postgres
+  gather_facts: no
+  tasks:
+    - name: postgres | add dspace user
+      postgresql_user: name={{dbuser}} password={{dbpass}}
+      tags: postgres
+    - name: postgres | add dspace database
+      postgresql_db: name={{dbname}} encoding='UTF-8' template='template0' owner={{dbuser}}
+      tags: postgres
+    - name: postgres | configure md5 auth for dspace database
+      template: src=templates/pg_hba.conf.j2 dest=/etc/postgresql/9.1/main/pg_hba.conf
+      tags: postgres
+    - name: postgres | restart
+      service: name=postgresql state=restarted
+      tags: postgres
+
+##
+# Install Oracle JDK7
+# see: http://www.webupd8.org/2012/01/install-oracle-java-jdk-7-in-ubuntu-via.html
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: jdk7 | add webupd8team ppa
+      apt_repository: repo='ppa:webupd8team/java' update_cache=yes
+      tags: jdk
+    - name: jdk7 | accept Oracle license
+      shell: echo oracle-java7-installer shared/accepted-oracle-license-v1-1 select true | /usr/bin/debconf-set-selections
+      tags: jdk
+    - name: jdk7 | install
+      action: apt pkg={{item}} install_recommends=no
+      with_items:
+        - oracle-java7-installer
+        - oracle-java7-set-default
+      tags: jdk
+
+##
+# Configure Tomcat
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: tomcat | stop
+      service: name=tomcat7 state=stopped
+      tags: tomcat
+    - name: tomcat | configure server.xml
+      template: src=templates/server.xml.j2 dest=/etc/tomcat7/server.xml
+      tags: tomcat
+    - name: tomcat | configure tomcat defaults
+      template: src=templates/tomcat7.j2 dest=/etc/default/tomcat7
+      tags: tomcat
+    - name: tomcat | change tomcat shell to bash
+      user: name=tomcat7 shell=/bin/bash
+      tags: tomcat
+    - name: tomcat | prepare maven settings dir
+      file: dest=/usr/share/tomcat7/.m2 owner=tomcat7 group=tomcat7 mode=770 state=directory
+      tags: tomcat
+    - name: tomcat | prepare dspace source dir
+      file: dest={{dspace_source_dir}} owner=tomcat7 group=tomcat7 mode=770 state=directory
+      tags: tomcat
+    - name: tomcat | prepare webapps dir
+      file: dest={{dspace_install_dir}} owner=tomcat7 group=tomcat7 state=directory
+      tags: tomcat
+
+##
+# Configure Apache
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: httpd | disable default site
+      command: a2dissite default
+      tags: httpd
+    - name: httpd | enable modules
+      command: a2enmod rewrite headers proxy proxy_http expires
+      tags: httpd
+    - name: httpd | copy vhost config
+      template: src=templates/dspace.j2 dest=/etc/apache2/sites-available/dspace
+      tags: httpd
+    - name: httpd | enable dspace site
+      command: a2ensite dspace
+      tags: httpd
+    - name: httpd | restart
+      service: name=apache2 state=restarted
+      tags: httpd
+
+##
+# DSpace
+- hosts: dspace
+  sudo: yes
+  sudo_user: tomcat7
+  gather_facts: no
+  tasks:
+    - name: dspace | clone
+      git: repo=https://github.com/ilri/DSpace.git dest={{dspace_source_dir}} version={{git_branch}} depth=1
+      tags: dspace
+    - name: dspace | config
+      template: src=templates/build.properties.j2 dest={{dspace_source_dir}}/{{apache_server_hostname}}.properties
+      tags: dspace
+    - name: dspace | build
+      command: mvn -U package -Denv={{apache_server_hostname}} chdir={{dspace_source_dir}}
+      tags: dspace
+    - name: dspace | perform fresh install
+      command: /opt/apache-ant-1.9.2/bin/ant fresh_install chdir={{dspace_source_dir}}/dspace/target/dspace-3.1-build creates={{dspace_install_dir}}/webapps/xmlui
+      tags: dspace
+    - name: dspace | set up tomcat ROOT context
+      shell: echo '<Context docBase="{{dspace_install_dir}}/webapps/xmlui"/>' > /var/lib/tomcat7/conf/Catalina/localhost/ROOT.xml
+      tags: dspace
+    - name: dspace | set up other tomcat contexts
+      shell: echo '<Context docBase="{{dspace_install_dir}}/webapps/{{item}}"/>' > /var/lib/tomcat7/conf/Catalina/localhost/{{item}}.xml
+      with_items: 
+        - solr
+        - jspui
+        - oai
+      tags: dspace
+
+##
+# Restart Tomcat after webapp installation
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: tomcat | start
+      service: name=tomcat7 state=started
+      tags: tomcat
+
+##
+# Misc utils
+- hosts: dspace
+  sudo: yes
+  gather_facts: no
+  tasks:
+    - name: Install misc utilities
+      apt: pkg={{item}} install_recommends=no
+      with_items:
+        - xpdf # if you're using DSpace thumbnails
+        - lrzip
+        - iotop
+        - mtr
+        - links
+        - htop
+        - vim
+      tags: misc
+
+# vim: set sw=2 ts=2:

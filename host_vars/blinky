@@ -1,0 +1,14 @@
+---
+dbname: dspace
+dbuser: dspace
+dbpass: dspace
+git_branch: 3_x-dev
+dspace_install_dir: /dspace
+dspace_source_dir: /usr/share/tomcat7/src/git/DSpace
+apache_server_hostname: repository.example.org
+apache_server_aliases: dspace.example.org
+apache_server_admin: d.space@example.org
+tomcat_memory_max: 1024m
+tomcat_memory_min: 1024m
+tomcat_perm_size: 128m
+apt_mirror: us-east-1.ec2.archive.ubuntu.com
